@@ -2459,7 +2459,7 @@ cubeFlipT :: TermT var -> TermT var
 cubeFlipT t = CubeFlipT info t
   where
     info = TypeInfo
-      { infoType = typeModalT Op cube2T
+      { infoType = typeModalT cube2T Op cube2T
       , infoNF = Nothing
       , infoWHNF = Nothing
       }
@@ -2477,7 +2477,7 @@ topeInvT :: TermT var -> TermT var
 topeInvT t = TopeInvT info t
   where
     info = TypeInfo
-      { infoType = topeT
+      { infoType = typeModalT topeT Op topeT
       , infoNF = Nothing
       , infoWHNF = Nothing
       }
@@ -2688,12 +2688,12 @@ typeAscT x ty = t
       , infoWHNF  = Nothing
       }
 
-typeModalT :: TModality -> TermT var -> TermT var
-typeModalT md ty = t
+typeModalT :: TermT var -> TModality -> TermT var -> TermT var
+typeModalT ty md te = t
   where
-    t = TypeModalT info md ty
+    t = TypeModalT info md te
     info = TypeInfo
-      { infoType = universeT
+      { infoType = ty
       , infoNF = Nothing
       , infoWHNF = Nothing
       }
@@ -2783,8 +2783,9 @@ typecheck term ty = performing (ActionTypeCheck term ty) $ do
         val' <- performing (ActionCheckLetValue orig) $ case annot of
           Nothing -> enterModality ext $ infer val
           Just bindType -> do
-            bindType' <- typecheck bindType universeT
-            enterModality ext $ typecheck val (typeModalT inn bindType')
+            bindType' <- infer bindType
+            bindUniv <- typeOf bindType' 
+            enterModality ext $ typecheck val (typeModalT bindUniv inn bindType')
         bindTy <- typeOf val' >>= \case 
           o@(TypeModalT _ty md t) -> 
             if md == inn then 
@@ -2886,7 +2887,7 @@ infer tt = performing (ActionInfer tt) $ case tt of
     t' <- typecheck t cube2T
     return (cubeFlipT t')
   CubeUnflip t -> do
-    t' <- typecheck t (typeModalT Op cube2T)
+    t' <- typecheck t (typeModalT cube2T Op cube2T)
     return (cubeUnflipT t')
 
   Pair l r -> do
@@ -3110,8 +3111,9 @@ infer tt = performing (ActionInfer tt) $ case tt of
     val' <- performing (ActionCheckLetValue orig) $ case annot of
       Nothing -> enterModality ext $ infer val
       Just bindType -> do
-        bindType' <- typecheck bindType universeT
-        enterModality ext $ typecheck val (typeModalT inn bindType')
+        bindType' <- infer bindType
+        bindUniv <- typeOf bindType'
+        enterModality ext $ typecheck val (typeModalT bindUniv inn bindType')
     bindTy <- typeOf val' >>= \case 
       o@(TypeModalT _ty md t) -> 
         if md == inn then 
@@ -3173,12 +3175,19 @@ infer tt = performing (ActionInfer tt) $ case tt of
     sequence_ [ checkCoherence l r | l:rs'' <- tails rs', r <- rs'' ]
     return (typeRestrictedT ty' rs')
   TypeModal md ty -> do
-    ty' <- enterModality md $ typecheck ty universeT
-    return (typeModalT md ty')
+    ty' <- enterModality md $ infer ty
+    universeTy <- typeOf ty'
+    _ <- case universeTy of 
+      UniverseT {} -> pure universeTy 
+      Cube2T {} -> pure universeTy 
+      UniverseTopeT {} -> pure topeT
+      _ -> issueTypeError $ TypeErrorOther "not a type inside modal type"
+    return (typeModalT universeTy md ty')
   ModApp md term -> do
     term' <- enterModality md $ infer term
     ty <- typeOf term'
-    return $ modAppT (typeModalT md ty) md term'
+    tyUniv <- typeOf ty
+    return $ modAppT (typeModalT tyUniv md ty) md term'
   ModExtract _ _ _ -> error "untypable $extract$"
 
 checkCoherence
