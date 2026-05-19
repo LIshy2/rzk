@@ -1,5 +1,12 @@
 [
   {
+    "version": "modal-pr",
+    "title": "modal-pr",
+    "aliases": [
+      "latest"
+    ]
+  },
+  {
     "version": "develop",
     "title": "develop",
     "aliases": []
