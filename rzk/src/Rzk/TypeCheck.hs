@@ -1221,13 +1221,18 @@ generateTopesForPointsM points = do
           , y <- points'
           , x /= y ]
         ]
+  stars <- forM points $ \x -> do 
+    xType <- typeOf x 
+    return $ if (xType == cubeUnitT) 
+      then [topeEQT x cubeUnitStarT] 
+      else []
   topes <- forM pairs $ \(x, y) -> do
     xType <- typeOf x
     yType <- typeOf y
     return $ if (xType == cube2T) && (yType == cube2T)
       then [topeOrT (topeLEQT x y) (topeLEQT y x)]
       else []
-  return (concat topes)
+  return (concat (topes ++ stars))
 
 allTopePoints :: Eq var => TermT var -> [TermT var]
 allTopePoints = nubTermT . foldMap subPoints . nubTermT . topePoints
@@ -1248,6 +1253,7 @@ subPoints = \case
   p@Pure{} -> [p]
   p@(Free (AnnF TypeInfo{..} _))
     | Cube2T{} <- infoType -> [p]
+    | CubeUnitT{} <- infoType -> [p]
   _ -> []
 
 -- | Simplify the context, including disjunctions. See also 'simplifyLHS'.
@@ -1305,6 +1311,12 @@ solveRHSM topes tope =
           , tope `elem` topes
           , topeEQT r l `elem` topes
           ] -> return True
+    TopeEQT  _ty l r -> do 
+      lType <- typeOf l 
+      rType <- typeOf r 
+      return $ case (lType, rType) of
+        (CubeUnitT{}, CubeUnitT{}) -> True 
+        _ -> False
     TopeLEQT _ty l r
       | l == r -> return True
       | solveRHS topes (topeEQT l r) -> return True
@@ -1791,12 +1803,12 @@ nfTope tt = performing (ActionNF tt) $ fmap termIsNF $ case tt of
   -- cube layer with computation
   CubeProductT _ty l r -> cubeProductT <$> nfTope l <*> nfTope r
 
-  CubeFlipT ty t ->
+  CubeFlipT _ t ->         
     nfTope t >>= \case
       CubeUnflipT _ t' -> pure t'     
-      Cube2_0T{}       -> pure (ModAppT ty Op cube2_1T)  
-      Cube2_1T{}       -> pure (ModAppT ty Op cube2_0T) 
-      t'               -> pure (CubeFlipT ty t')
+      Cube2_0T{}       -> pure (modAppT (typeModalT cubeT Op cube2T) Op cube2_1T)  
+      Cube2_1T{}       -> pure (modAppT (typeModalT cubeT Op cube2T) Op cube2_0T) 
+      t'               -> pure (cubeFlipT t')
 
   CubeUnflipT ty t ->
     nfTope t >>= \case
@@ -1828,23 +1840,64 @@ nfTope tt = performing (ActionNF tt) $ fmap termIsNF $ case tt of
   TopeEQT  ty l r -> TopeEQT  ty <$> nfTope l <*> nfTope r
   TopeLEQT ty l r -> TopeLEQT ty <$> nfTope l <*> nfTope r
 
-  TopeInvT ty t ->
+  TopeInvT ty t -> 
     nfTope t >>= \case
-      TopeLEQT ty' x y -> nfTope $ ModAppT ty Op (TopeLEQT ty' (ModExtractT ty Id Op (CubeFlipT ty y)) (ModExtractT ty Id Op (CubeFlipT ty x)))
-      TopeEQT  ty' x y -> nfTope $ ModAppT ty Op (TopeEQT  ty' (ModExtractT ty Id Op (CubeFlipT ty y)) (ModExtractT ty Id Op (CubeFlipT ty x)))
-      TopeAndT ty' phi psi -> nfTope $ ModAppT ty Op (TopeAndT ty' (ModExtractT ty Id Op (TopeInvT ty phi)) (ModExtractT ty Id Op (TopeInvT ty psi)))
-      TopeOrT  ty' phi psi -> nfTope $ ModAppT ty Op (TopeOrT  ty' (ModExtractT ty Id Op (TopeInvT ty phi)) (ModExtractT ty Id Op (TopeInvT ty psi)))
+      TopeLEQT _ x y -> nfTope $
+        modAppT (typeModalT universeT Op topeT) Op
+          (topeLEQT 
+            (modExtractT topeT Id Op (cubeFlipT y))
+            (modExtractT topeT Id Op (cubeFlipT x)))
+      TopeEQT _ x y -> nfTope $
+        modAppT (typeModalT universeT Op topeT) Op
+          (topeEQT 
+            (modExtractT topeT Id Op (cubeFlipT y))
+            (modExtractT topeT Id Op (cubeFlipT x)))
+      TopeAndT _ phi psi -> nfTope $ 
+        modAppT (typeModalT universeT Op topeT) Op 
+          (topeAndT 
+            (modExtractT topeT Id Op (topeInvT phi))
+            (modExtractT topeT Id Op (topeInvT psi)))
+      TopeOrT _ phi psi -> nfTope $
+        modAppT (typeModalT universeT Op topeT) Op 
+          (topeOrT 
+            (modExtractT topeT Id Op (topeInvT phi))
+            (modExtractT topeT Id Op (topeInvT psi)))
       t' -> pure (TopeInvT ty t')
 
   TopeUninvT ty t ->
     nfTope t >>= \case
-      ModAppT mty Op inner -> case inner of
-        TopeLEQT ty' x y    -> nfTope $ TopeLEQT ty' (CubeUnflipT ty (ModAppT mty Op y)) (CubeUnflipT ty (ModAppT mty Op x))
-        TopeEQT  ty' x y    -> nfTope $ TopeEQT  ty' (CubeUnflipT ty (ModAppT mty Op y)) (CubeUnflipT ty (ModAppT mty Op x))
-        TopeAndT ty' phi psi -> nfTope $ TopeAndT ty' (TopeUninvT ty (ModAppT mty Op phi)) (TopeUninvT ty (ModAppT mty Op psi))
-        TopeOrT  ty' phi psi -> nfTope $ TopeOrT  ty' (TopeUninvT ty (ModAppT mty Op phi)) (TopeUninvT ty (ModAppT mty Op psi))
-        _                    -> pure (TopeUninvT ty (ModAppT mty Op inner))
-      t' -> pure (TopeUninvT ty t')
+      ModAppT _ Op inner -> case inner of
+        TopeLEQT _ x y ->
+          nfTope $
+              (topeLEQT
+                (cubeUnflipT (modAppT (typeModalT cubeT Op cube2T) Op y))
+                (cubeUnflipT (modAppT (typeModalT cubeT Op cube2T) Op x)))
+
+        TopeEQT _ x y ->
+          nfTope $
+              (topeEQT
+                (cubeUnflipT (modAppT (typeModalT cubeT Op cube2T) Op y))
+                (cubeUnflipT (modAppT (typeModalT cubeT Op cube2T) Op x)))
+
+        TopeAndT _ phi psi ->
+          nfTope $
+              (topeAndT
+                (topeUninvT phi)
+                (topeUninvT psi))
+
+        TopeOrT _ phi psi ->
+          nfTope $
+              (topeOrT
+                (topeUninvT phi)
+                (topeUninvT psi))
+
+        inner' ->
+          pure $
+            TopeUninvT ty
+              (modAppT (typeModalT universeT Op topeT) Op inner')
+
+      t' ->
+        pure (TopeUninvT ty t')
 
   -- type ascriptions are ignored, since we already have a typechecked term
   TypeAscT _ty term _ty' -> nfTope term
@@ -1876,15 +1929,22 @@ nfTope tt = performing (ActionNF tt) $ fmap termIsNF $ case tt of
     | TypeFunT _ty _origF param mtope _ret <- infoType ty ->
         LambdaT ty orig (Just (param, mtope)) <$> enterScope orig param (nfTope body)
   LambdaT{} -> panicImpossible "lambda with a non-function type in the tope layer"
-  ModAppT ty md b -> ModAppT ty md <$> nfTope b
-  ModExtractT ty app ext b ->
-    whnfT b >>= \case
-      ModAppT _ _ t -> nfTope t
-      b' -> ModExtractT ty app ext <$> nfTope b'
-  LetModT ty _orig ext inn _mparam val body -> do
-    val' <- whnfT val >>= \case
-      ModAppT _ _ t -> nfTope t
-      b' -> pure (ModExtractT ty ext inn b')
+  ModAppT ty md b -> 
+    nfTope b >>= \case 
+      ModExtractT _ ext inn t | comp ext inn == md -> pure t
+      b' -> pure $ ModAppT ty md b'  
+  ModExtractT ty app ext b ->  
+    nfTope b >>= \case
+      ModAppT _ _ t -> pure t
+      b' -> ModExtractT ty app ext <$> pure b'
+  LetModT _ty _orig ext inn _mparam val body -> do
+    val' <- nfTope val >>= \case
+      ModAppT _ _ t -> return t
+      b' -> do 
+        ty <- typeOf b' >>= \case 
+          TypeModalT _ _ t -> pure t
+          _ -> panicImpossible "not modal in letmod"
+        pure (modExtractT ty ext inn b')
     nfTope (substituteT val' body)
 
   TypeModalT ty md inner -> TypeModalT ty md <$> nfTope inner
@@ -2941,7 +3001,7 @@ infer tt = performing (ActionInfer tt) $ case tt of
     t' <- typecheck t cube2T
     return (cubeFlipT t')
   CubeUnflip t -> do
-    t' <- typecheck t (typeModalT cube2T Op cube2T)
+    t' <- typecheck t (typeModalT cubeT Op cube2T)
     return (cubeUnflipT t')
 
   Pair l r -> do
@@ -3015,7 +3075,7 @@ infer tt = performing (ActionInfer tt) $ case tt of
     return (topeInvT t')
 
   TopeUninv t -> do
-    t' <- typecheck t topeT
+    t' <- typecheck t (typeModalT universeT Op topeT )
     return (topeUninvT t')
 
   RecBottom -> do
